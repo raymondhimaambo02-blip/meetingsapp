@@ -10,9 +10,11 @@ import { Bell, BellRing, Ban, Building2, Calendar, Check, ChevronDown, Clock, Ey
 
 /* ---------- Alerts: sound, voice, vibration ---------- */
 let ctx;
+const audioCtx = () => { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === "suspended") ctx.resume().catch(() => {}); return ctx; };
+if (typeof window !== "undefined") ["touchstart", "touchend", "click", "keydown"].forEach((ev) => window.addEventListener(ev, () => { try { audioCtx(); } catch (e) {} }, { passive: true }));
 function playChime() {
   try {
-    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx();
     [659.25, 783.99, 987.77].forEach((f, i) => {
       const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.18;
       o.type = "sine"; o.frequency.value = f;
@@ -23,7 +25,8 @@ function playChime() {
     });
   } catch (e) {}
 }
-const speak = (s) => { try { if (!("speechSynthesis" in window)) return; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(s); u.rate = 0.95; speechSynthesis.speak(u); } catch (e) {} };
+const TTS = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.TextToSpeech : undefined);
+const speak = (s) => { const t = TTS(); if (t) { try { t.stop?.(); Promise.resolve(t.speak({ text: s, lang: "en-US", rate: 0.95, pitch: 1, volume: 1, category: "ambient" })).catch(() => {}); } catch (e) {} return; } try { if (!("speechSynthesis" in window)) return; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(s); u.rate = 0.95; speechSynthesis.speak(u); } catch (e) {} };
 const buzz = () => { try { navigator.vibrate && navigator.vibrate([250, 120, 250, 120, 500]); } catch (e) {} };
 const fmtDate = (d) => new Date(d + "T00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const fmtTime = (t) => { const [h, m] = t.split(":"); const d = new Date(); d.setHours(+h, +m); return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
@@ -51,7 +54,7 @@ const openUrl = (u) => { try { window.open(u, "_blank", "noopener"); } catch (e)
 /* Loud alarm: repeats from the invitation screen until the client replies */
 function playAlarm() {
   try {
-    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx();
     [0, 0.4, 0.8].forEach((off) => [880, 1174.66].forEach((f, i) => {
       const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + off + i * 0.16;
       o.type = "square"; o.frequency.value = f;
@@ -70,6 +73,7 @@ function runAlert(m, o) {
 }
 
 /* Supabase: shared online login and database. These two values are public by design; the security rules live in the database. */
+const WEB_URL = "https://raymondhimaambo02-blip.github.io/meetingsapp/"; /* where password-reset emails send people */
 const SUPABASE_URL = "https://fjllqemgtfqcorstpzzj.supabase.co";
 const SUPABASE_KEY = "sb_publishable_uvGkMC_moKbNnjGs8x7HhA_TCQ6ueOf";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
@@ -94,7 +98,7 @@ let ready;
 const ensureNative = (ln) => ready || (ready = (async () => {
   try {
     await ln.requestPermissions();
-    await ln.createChannel({ id: "meetings", name: "Meeting alerts", description: "Invitations and reminders", importance: 5, visibility: 1, vibration: true, lights: true });
+    await ln.createChannel({ id: "meetings_alarm", name: "Meeting alerts", description: "Invitations and reminders", importance: 5, visibility: 1, sound: "meeting_alarm.wav", vibration: true, lights: true });
     if (!store.get("exactAsked", false)) {
       const r = await ln.checkExactNotificationSetting?.();
       if (r && r.exact_alarm !== "granted") { store.set("exactAsked", true); await ln.changeExactNotificationSetting?.(); }
@@ -119,6 +123,8 @@ const webSR = () => (typeof window !== "undefined" ? window.SpeechRecognition ||
 const canListen = () => !!(SRPlugin() || webSR());
 const sayLang = () => (/^en/i.test(navigator.language || "") ? navigator.language : "en-US");
 const say = (s) => new Promise((res) => {
+  const t = TTS();
+  if (t) { try { t.stop?.(); Promise.resolve(t.speak({ text: s, lang: sayLang(), rate: 0.95, pitch: 1, volume: 1, category: "ambient" })).then(() => res(), () => res()); setTimeout(res, 20000); } catch (e) { res(); } return; }
   try {
     if (!("speechSynthesis" in window)) return res();
     speechSynthesis.cancel();
@@ -126,7 +132,8 @@ const say = (s) => new Promise((res) => {
     u.onend = u.onerror = () => res(); speechSynthesis.speak(u); setTimeout(res, 20000);
   } catch (e) { res(); }
 });
-const listen = async () => {
+let WEBREC = null;
+const listen = async (opts = {}) => {
   const p = SRPlugin();
   if (p) {
     try {
@@ -138,13 +145,13 @@ const listen = async () => {
   }
   const W = webSR(); if (!W) return "";
   return new Promise((res) => {
-    const rec = new W(); let done = false;
-    const fin = (t) => { if (!done) { done = true; res(t); } };
+    const rec = new W(); let done = false; WEBREC = rec;
+    const fin = (t) => { if (!done) { done = true; WEBREC = null; res(t); } };
     rec.lang = sayLang(); rec.interimResults = false; rec.maxAlternatives = 1;
     rec.onresult = (e) => fin((e.results[0]?.[0]?.transcript || "").trim());
     rec.onerror = () => fin(""); rec.onend = () => fin("");
     try { rec.start(); } catch (e) { fin(""); }
-    setTimeout(() => { try { rec.stop(); } catch (e) {} }, 12000);
+    setTimeout(() => { try { rec.stop(); } catch (e) {} }, opts.long ? 60000 : 12000);
   });
 };
 const isNo = (s) => /\b(no|nope|can'?t|cannot|can not|won'?t|not attend|not coming|not able|decline|sorry)\b/i.test(s);
@@ -448,6 +455,13 @@ export default function MeetingApp() {
   const [pop, setPop] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [confirm, setConfirm] = useState(null);
+  const [rec, setRec] = useState(null);
+  const recOn = useRef(false);
+  const [recov, setRecov] = useState(false);
+  const [np, setNp] = useState("");
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwFor, setPwFor] = useState(null);
+  const [pwVal, setPwVal] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [nu, setNu] = useState({ ...BLANK, role: "client" });
   const [msgs, setMsgs] = useState([]);
@@ -580,7 +594,7 @@ export default function MeetingApp() {
   /* Restore the session when the app opens; keep the fingerprint token fresh */
   useEffect(() => {
     let alive = true;
-    const { data: sub } = supabase.auth.onAuthStateChange((ev, s) => { if (s && store.get("bioUser", null) === s.user.id) store.set("bioRT", s.refresh_token); });
+    const { data: sub } = supabase.auth.onAuthStateChange((ev, s) => { if (ev === "PASSWORD_RECOVERY") setRecov(true); if (s && store.get("bioUser", null) === s.user.id) store.set("bioRT", s.refresh_token); });
     (async () => {
       try {
         const { data } = await supabase.auth.getSession();
@@ -646,7 +660,7 @@ export default function MeetingApp() {
               const at = startOf(m) - mins * 60000;
               if (!(at > Date.now())) return;
               const id = nid(`${m.id}-${uid}-${mins}`);
-              want.set(id, { id, channelId: "meetings", title: mins ? `Meeting in ${mins} minutes` : "Meeting starting now", body: `${m.topic} · ${where(m)}`, schedule: { at: new Date(at), allowWhileIdle: true }, extra: { meetingId: m.id } });
+              want.set(id, { id, channelId: "meetings_alarm", sound: "meeting_alarm.wav", title: mins ? `Meeting in ${mins} minutes` : "Meeting starting now", body: `${m.topic} · ${where(m)}`, schedule: { at: new Date(at), allowWhileIdle: true }, extra: { meetingId: m.id } });
             });
           });
         }
@@ -764,6 +778,63 @@ export default function MeetingApp() {
     const ok = await dbq(supabase.from("profiles").update({ role }).eq("id", id), "Couldn’t change the role. Try again.");
     if (ok) flash(`Role changed to ${ROLE[role]}.`);
     else setUsers((x) => x.map((u) => (u.id === id ? { ...u, role: prev } : u)));
+    schedLoad();
+  };
+  /* Passwords */
+  const forgot = async () => {
+    if (busy) return;
+    const email = auth.email.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(email)) return setErr("Type your email above first, then tap Forgot password.");
+    setBusy(true); setErr("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: WEB_URL });
+      if (error) return setErr(/rate|seconds|limit/i.test(error.message) ? "Too many requests. Wait a few minutes and try again." : error.message);
+      flash("If that email has an account, a reset link is on its way. Check your inbox and spam.");
+    } catch (e) { setErr("Couldn’t reach the server. Check your internet and try again."); }
+    finally { setBusy(false); }
+  };
+  const finishRecovery = async () => {
+    if (busy) return;
+    if (np.length < 6) return setErr("Password must be at least 6 characters.");
+    setBusy(true); setErr("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password: np });
+      if (error) return setErr(error.message || "Couldn’t save the new password.");
+      setNp(""); setRecov(false);
+      try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+      flash("Password changed.");
+      const { data } = await supabase.auth.getSession();
+      if (data.session) { const d = await loadAll(data.session.user.id); if (d && !d.me.status) enter(d.me, d); }
+    } catch (e) { setErr("Couldn’t reach the server. Try again."); }
+    finally { setBusy(false); }
+  };
+  const changePw = async () => {
+    if (np.length < 6) return flash("Password must be at least 6 characters.");
+    const { error } = await supabase.auth.updateUser({ password: np });
+    if (error) return flash(error.message || "Couldn’t change the password.");
+    setNp(""); setPwOpen(false); flash("Your password was changed.");
+  };
+  const resetPw = async (u) => {
+    if (pwVal.length < 6) return flash("Password must be at least 6 characters.");
+    const ok = await dbq(supabase.rpc("manager_set_password", { target: u.id, new_password: pwVal }), "Couldn’t change the password. Check the password SQL was run in Supabase.");
+    if (ok) { flash(`Password changed for ${u.name}. Give them the new password.`); setPwFor(null); setPwVal(""); }
+  };
+
+  /* Delete meetings for everyone (replies, check-ins and minutes go with them) */
+  const deleteMeeting = async (m) => {
+    setMeetings((ms) => ms.filter((x) => x.id !== m.id)); setConfirm(null); setOpen(null);
+    const ok = await dbq(supabase.from("meetings").delete().eq("id", m.id), "Couldn’t delete the meeting. Try again.");
+    if (ok) flash("Meeting deleted for everyone.");
+    schedLoad();
+  };
+  const clearPast = async () => {
+    const old = meetings.filter((m) => startOf(m) < Date.now() - 3 * 3600000);
+    setConfirm(null);
+    if (!old.length) return flash("No past meetings to clear.");
+    const ids = old.map((m) => m.id);
+    setMeetings((ms) => ms.filter((x) => !ids.includes(x.id)));
+    const ok = await dbq(supabase.from("meetings").delete().in("id", ids), "Couldn’t clear the past meetings. Try again.");
+    if (ok) flash(`${old.length} past meeting${old.length > 1 ? "s" : ""} deleted for everyone.`);
     schedLoad();
   };
   const setStatus = async (id, status) => {
@@ -948,6 +1019,30 @@ export default function MeetingApp() {
     </div>
   );
 
+  /* ---------- Set a new password (from the reset email link) ---------- */
+  if (recov) {
+    return (
+      <div className="mt">
+        <style>{css}</style>{shared}
+        <header className="h-admin">
+          <div className="hero">
+            <div className="logo big"><Bell size={30} /></div>
+            <h1>Meetings</h1>
+            <div className="sub">Reset your password</div>
+          </div>
+        </header>
+        <main>
+          <div className="wel"><h2>Choose a new password</h2><p>Enter a new password for your account.</p><i /></div>
+          <Field icon={Lock} aria-label="New password" type={show ? "text" : "password"} value={np} onChange={(e) => setNp(e.target.value)} placeholder="New password (6+ characters)" autoComplete="new-password"
+            onKeyDown={(e) => e.key === "Enter" && finishRecovery()}
+            right={<button className="eye" onClick={() => setShow(!show)} aria-label="Show password">{show ? <EyeOff size={18} /> : <Eye size={18} />}</button>} />
+          {err && <div className="err" role="alert">{err}</div>}
+          <button className="go" style={{ marginTop: 8 }} disabled={busy} onClick={finishRecovery}><Check size={19} /> {busy ? "Please wait…" : "Save new password"}</button>
+        </main>
+      </div>
+    );
+  }
+
   /* ---------- Login / Register ---------- */
   if (!user) {
     const set = (k) => (e) => setAuth({ ...auth, [k]: e.target.value });
@@ -987,6 +1082,7 @@ export default function MeetingApp() {
             onKeyDown={(e) => e.key === "Enter" && (reg ? register() : login())}
             right={<button className="eye" onClick={() => setShow(!show)} aria-label="Show password">{show ? <EyeOff size={18} /> : <Eye size={18} />}</button>} />
           <label className="rem-me"><input type="checkbox" checked={remember} onChange={(e) => { setRemember(e.target.checked); if (!e.target.checked) { store.del("remember"); store.set("rememberOff", true); } }} /> Remember my email on this phone</label>
+          {!reg && <button type="button" onClick={forgot} disabled={busy} style={{ background: "none", border: 0, padding: "4px 2px", margin: "2px 0 6px", color: "var(--vio)", font: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer", textAlign: "left" }}>Forgot password?</button>}
           {err && <div className="err" role="alert">{err}</div>}
           <button className="go" style={{ marginTop: 8 }} disabled={busy} onClick={reg ? register : login}>{reg ? <UserPlus size={19} /> : <Check size={19} />} {busy ? "Please wait…" : reg ? "Create account" : "Log in"}</button>
           {reg && <div className="hint">New accounts are clients. A manager can change that.</div>}
@@ -1041,18 +1137,30 @@ export default function MeetingApp() {
     try { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["\ufeff" + text], { type: "text/plain" })); a.download = file; document.body.appendChild(a); a.click(); a.remove(); flash("Minutes downloaded"); }
     catch (e) { try { navigator.clipboard.writeText(text); flash("Minutes copied to clipboard"); } catch (e2) {} }
   };
+  const stopRec = async () => {
+    recOn.current = false;
+    try { await SRPlugin()?.stop?.(); } catch (e) {}
+    try { WEBREC && WEBREC.stop(); } catch (e) {}
+  };
+  /* Record minutes: keeps listening and adds what is said until you tap Stop */
   const dictate = async (field) => {
-    if (VOICE) return; VOICE = true;
+    if (recOn.current) return stopRec();
+    if (VOICE) return;
+    VOICE = true; recOn.current = true; setRec(field); setListening("listening");
+    let empty = 0;
     try {
-      setListening("listening");
-      const x = await listen();
-      if (x) setMd((d) => (d ? { ...d, [field]: (d[field] ? d[field].replace(/\s+$/, "") + "\n" : "") + x } : d));
-      else flash("I didn’t catch that. Tap the mic and try again.");
-    } finally { VOICE = false; setListening(""); }
+      while (recOn.current) {
+        const x = await listen({ long: true });
+        if (x) { empty = 0; setMd((d) => (d ? { ...d, [field]: (d[field] ? d[field].replace(/\s+$/, "") + " " : "") + x } : d)); }
+        else if (recOn.current && ++empty >= 3) { flash("Couldn’t hear anything. Check the microphone is allowed, then try again."); break; }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    } finally { recOn.current = false; VOICE = false; setRec(null); setListening(""); }
   };
   const setAct = (i, patch) => setMd((d) => ({ ...d, actions: d.actions.map((a, k) => (k === i ? { ...a, ...patch } : a)) }));
   const saveMin = async (m, mode) => {
     const d = md; if (!d || d.id !== m.id) return;
+    if (recOn.current) stopRec();
     const actions = d.actions.filter((a) => a.task.trim()).map((a) => ({ ...a, task: a.task.trim() }));
     const published = mode === "publish" ? true : mode === "hide" ? false : !!mins[m.id]?.published;
     const row = { meeting_id: m.id, notes: d.notes.trim(), decisions: d.decisions.trim(), actions, published, updated_at: new Date().toISOString() };
@@ -1082,9 +1190,9 @@ export default function MeetingApp() {
         {a.sorry.length > 0 && <div className="cap" style={{ margin: "0 0 2px" }}><b>Apologies:</b> {a.sorry.join(", ")}</div>}
         {a.none.length > 0 && <div className="cap" style={{ margin: "0 0 8px" }}><b>No reply:</b> {a.none.join(", ")}</div>}
         <div className="fld" style={{ background: "#fff", alignItems: "flex-start" }}><FileText size={18} style={{ marginTop: 14 }} /><textarea rows={5} aria-label="Discussion notes" value={md.notes} onChange={(e) => setMd({ ...md, notes: e.target.value })} placeholder="What was discussed" /></div>
-        {canListen() && <button className="remind" style={{ marginTop: 0, marginBottom: 10 }} disabled={!!listening} onClick={() => dictate("notes")}><Mic size={16} /> {micLabel || "Dictate notes"}</button>}
+        {canListen() ? <button className="remind" style={{ marginTop: 0, marginBottom: 10, background: rec === "notes" ? "var(--coral)" : undefined }} disabled={!!listening && rec !== "notes"} onClick={() => dictate("notes")}><Mic size={16} /> {rec === "notes" ? "Stop recording" : micLabel || "Record notes"}</button> : <div className="cap" style={{ margin: "0 0 10px" }}>Voice recording isn’t available on this device. You can type the notes instead.</div>}
         <div className="fld" style={{ background: "#fff", alignItems: "flex-start" }}><Check size={18} style={{ marginTop: 14 }} /><textarea rows={3} aria-label="Decisions made" value={md.decisions} onChange={(e) => setMd({ ...md, decisions: e.target.value })} placeholder="Decisions made" /></div>
-        {canListen() && <button className="remind" style={{ marginTop: 0, marginBottom: 10 }} disabled={!!listening} onClick={() => dictate("decisions")}><Mic size={16} /> {micLabel || "Dictate decisions"}</button>}
+        {canListen() && <button className="remind" style={{ marginTop: 0, marginBottom: 10, background: rec === "decisions" ? "var(--coral)" : undefined }} disabled={!!listening && rec !== "decisions"} onClick={() => dictate("decisions")}><Mic size={16} /> {rec === "decisions" ? "Stop recording" : micLabel || "Record decisions"}</button>}
         <b>Action items</b>
         {md.actions.length === 0 && <div className="cap" style={{ margin: "4px 0 8px" }}>No action items yet.</div>}
         {md.actions.map((x, i) => (
@@ -1105,7 +1213,7 @@ export default function MeetingApp() {
         <button className="remind" style={{ marginTop: 10 }} onClick={() => saveMin(m, "publish")}><Send size={16} /> {md.published ? "Save and update attendees" : "Publish to attendees"}</button>
         {md.published && <button className="remind" style={{ marginTop: 10, background: "var(--mute)" }} onClick={() => saveMin(m, "hide")}>Hide from attendees</button>}
         <button className="remind" style={{ marginTop: 10, background: "var(--mute)" }} onClick={() => shareText("Minutes: " + m.topic, minutesText(m, md), `minutes-${m.date}.txt`)}><Download size={16} /> Share or download</button>
-        <button className="remind" style={{ marginTop: 10, background: "var(--mute)" }} onClick={() => setMd(null)}>Close</button>
+        <button className="remind" style={{ marginTop: 10, background: "var(--mute)" }} onClick={() => { stopRec(); setMd(null); }}>Close</button>
       </div>
     );
   };
@@ -1182,6 +1290,11 @@ export default function MeetingApp() {
             <Ban size={16} />{confirm === m.id ? "Tap again to cancel for everyone" : "Cancel meeting"}
           </button>
         )}
+        {canCancel && (
+          <button className={"cancel" + (confirm === "d" + m.id ? " sure" : "")} onClick={() => (confirm === "d" + m.id ? deleteMeeting(m) : ask("d" + m.id))}>
+            <Trash2 size={16} />{confirm === "d" + m.id ? "Tap again to delete for everyone" : "Delete meeting"}
+          </button>
+        )}
       </div>
     );
   });
@@ -1233,11 +1346,23 @@ export default function MeetingApp() {
           <Avatar c={user} size={38} />
           <div className="who2"><b>{user.name}</b><small>{ROLE[user.role]} · {user.org}</small></div>
           {bioOk && <button aria-label={bioId === user.id ? "Turn off fingerprint login" : "Turn on fingerprint login"} title={bioId === user.id ? "Fingerprint login is on" : "Turn on fingerprint login"} onClick={bioId === user.id ? bioOff : bioEnable} style={bioId === user.id ? { background: "#fff", color: "var(--vio)" } : undefined}><Fingerprint size={16} /></button>}
+          <button aria-label="Change my password" title="Change my password" onClick={() => { setPwOpen(!pwOpen); setNp(""); }}><Lock size={16} /></button>
           <button onClick={logout}><LogOut size={15} />Log out</button>
         </div>
       </header>
 
       <main>
+        {pwOpen && (
+          <div className="card2" style={{ marginTop: 0 }}>
+            <b>Change your password</b>
+            <div style={{ height: 8 }} />
+            <Field icon={Lock} aria-label="New password" type="password" value={np} onChange={(e) => setNp(e.target.value)} placeholder="New password (6+ characters)" autoComplete="new-password" />
+            <div className="acts" style={{ marginTop: 4 }}>
+              <button className="yes" onClick={changePw}><Check size={16} />Save</button>
+              <button onClick={() => { setPwOpen(false); setNp(""); }}>Cancel</button>
+            </div>
+          </div>
+        )}
         {offerBio && bioOk && (
           <div className="card2" style={{ marginTop: 0 }}>
             <b>Log in with your fingerprint next time?</b>
@@ -1325,7 +1450,8 @@ export default function MeetingApp() {
             )}
             <h2>Everyone · {users.length}</h2>
             {users.map((u) => (
-              <div className="urow" key={u.id}>
+              <div key={u.id}>
+              <div className="urow">
                 <Avatar c={u} size={42} />
                 <div style={{ flex: 1, minWidth: 0 }}><b>{u.name}</b><div className="cap" style={{ margin: 0, overflowWrap: "anywhere" }}>{u.email} · {u.org}</div></div>
                 {u.id !== uid && !u.status && u.role !== "manager" ? (
@@ -1335,6 +1461,9 @@ export default function MeetingApp() {
                   </select>
                 ) : (
                   <span className={"chip" + (u.status ? " no" : u.role === "client" ? "" : " wait")}>{u.status === "deleted" ? "Deleted" : u.status === "blocked" ? "Blocked" : ROLE[u.role]}</span>
+                )}
+                {u.id !== uid && u.status !== "deleted" && (
+                  <button className="trash" style={{ background: "#EDE9FF", color: "var(--vio)" }} aria-label={`Set a new password for ${u.name}`} title="Set a new password" onClick={() => { setPwFor(pwFor === u.id ? null : u.id); setPwVal(""); }}><Lock size={18} /></button>
                 )}
                 {u.id !== uid && (u.status === "deleted" ? (
                   <button className="trash" style={{ background: "#D6F7EC", color: "#0A8F6B", padding: "0 12px" }} onClick={() => setStatus(u.id, undefined)}>Restore</button>
@@ -1349,6 +1478,18 @@ export default function MeetingApp() {
                     </button>
                   </>
                 ))}
+              </div>
+              {pwFor === u.id && (
+                <div className="card2" style={{ margin: "6px 0 10px" }}>
+                  <b>New password for {u.name}</b>
+                  <div style={{ height: 8 }} />
+                  <Field icon={Lock} aria-label="New password" value={pwVal} onChange={(e) => setPwVal(e.target.value)} placeholder="New password (6+ characters)" />
+                  <div className="acts" style={{ marginTop: 4 }}>
+                    <button className="yes" onClick={() => resetPw(u)}><Check size={16} />Save password</button>
+                    <button onClick={() => { setPwFor(null); setPwVal(""); }}>Cancel</button>
+                  </div>
+                </div>
+              )}
               </div>
             ))}
           </>
@@ -1368,6 +1509,11 @@ export default function MeetingApp() {
                   </div>
                 ))}
               </div>
+            )}
+            {meetings.some((m) => startOf(m) < Date.now() - 3 * 3600000) && (
+              <button className={"cancel" + (confirm === "clearpast" ? " sure" : "")} style={{ marginTop: 14 }} onClick={() => (confirm === "clearpast" ? clearPast() : ask("clearpast"))}>
+                <Trash2 size={16} />{confirm === "clearpast" ? "Tap again to delete all past meetings" : "Delete all past meetings"}
+              </button>
             )}
             {sentList(true)}
           </>
